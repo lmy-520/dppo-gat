@@ -1,0 +1,3 @@
+# Diffusion MoE config
+diffusion:
+  timesteps: 1000

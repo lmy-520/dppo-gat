@@ -1,0 +1,4 @@
+# Add project Python dependencies here
+numpy
+torch
+pyyaml

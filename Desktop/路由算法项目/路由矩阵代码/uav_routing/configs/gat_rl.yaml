@@ -1,0 +1,3 @@
+# GAT RL config
+model:
+  hidden_dim: 128

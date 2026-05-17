@@ -1,0 +1,4 @@
+seed: 42
+env:
+  num_uavs: 10
+  area_size: 100
