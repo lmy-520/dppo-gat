@@ -254,7 +254,7 @@ class UAVNetworkEnv:
 
 
 
-    def step(self, policy: str = "random", actions=None):
+    def step(self, policy: str = "random", actions=None, action_matrix=None):
         """
         执行一个仿真步。
 
@@ -287,13 +287,21 @@ class UAVNetworkEnv:
                     self.total_delay += delay
                     continue
 
-                if actions is not None:
+                if action_matrix is not None:
+                    next_hop = int(action_matrix[i, dst])
+
+                    if next_hop < 0:
+                        next_hop = None
+
+                elif actions is not None:
                     next_hop = int(actions[i])
 
                     if next_hop < 0:
                         next_hop = None
+
                 else:
                     next_hop = self._choose_next_hop(i, dst, policy)
+
 
                 if next_hop is None or self.adj[i, next_hop] == 0:
                     self.total_dropped += 1

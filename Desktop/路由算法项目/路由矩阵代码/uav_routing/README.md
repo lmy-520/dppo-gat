@@ -791,3 +791,746 @@ Actor-Critic / PPO 训练
 ```
 
 阶段。
+
+
+# 无人机动态路由算法项目开发日志补充
+
+本文件用于追加到已有的 `uav_routing_development_log.md` 后面，记录从上一次日志之后到当前阶段的新增工作。
+
+---
+
+## 十六、V2：EdgeGAT 路由模型前向测试
+
+在完成 V0/V1 环境和 baseline 拆分后，开始进入 V2 阶段：构建基于图神经网络的路由模型。
+
+本阶段首先实现了轻量版边感知 GAT 模型：
+
+```text
+models/edge_gat.py
+```
+
+该模型输入为：
+
+```text
+node_features: [N, 9]
+edge_index: [2, E]
+edge_attr: [E, 5]
+```
+
+输出为：
+
+```text
+logits: [N, N]
+```
+
+其中：
+
+```text
+logits[i, j] 表示节点 i 选择节点 j 作为下一跳的得分
+```
+
+随后新增测试文件：
+
+```text
+debug/test_edge_gat_forward.py
+```
+
+测试链路为：
+
+```text
+state
+↓
+EdgeGATPolicy
+↓
+logits: [N, N]
+↓
+logits_to_actions()
+↓
+actions: [N]
+↓
+env.step(actions=actions)
+```
+
+测试通过，说明：
+
+```text
+动态图状态 → GAT 模型 → 动作投影 → 环境执行
+```
+
+这条前向链路已经打通。
+
+---
+
+## 十七、Actor-Critic 网络封装
+
+在 EdgeGAT 前向测试通过后，进一步封装了 Actor-Critic 网络：
+
+```text
+models/actor_critic.py
+```
+
+其中：
+
+```text
+Actor:
+    使用 EdgeGATPolicy
+    输出 logits: [N, N]
+
+Critic:
+    使用图级平均池化
+    输出 value 标量
+```
+
+测试文件为：
+
+```text
+debug/test_actor_critic_forward.py
+```
+
+运行结果如下：
+
+```text
+Testing EdgeGAT Actor-Critic forward...
+step=1, logits_shape=(20, 20), value=0.0827, delivered=0, dropped=0, violations=0
+...
+step=10, logits_shape=(20, 20), value=0.0827, delivered=4, dropped=26, violations=0
+Actor-Critic forward interface OK.
+```
+
+说明：
+
+```text
+1. Actor 能输出合法 logits
+2. Critic 能输出状态价值 value
+3. env.step(actions=actions) 可以正常执行
+4. 模型前向链路稳定
+```
+
+---
+
+## 十八、PPO 动作采样器实现
+
+为了支持 PPO 训练，新增了动作采样模块：
+
+```text
+routing/action_sampler.py
+```
+
+该模块包含两个核心函数：
+
+```python
+sample_actions_from_logits()
+evaluate_actions_from_logits()
+```
+
+功能包括：
+
+```text
+1. 从 logits 中按概率采样 actions
+2. 计算 actions 对应的 log_prob
+3. 计算策略 entropy
+4. 支持 deterministic=True 用于评估
+5. PPO 更新时可重新计算旧 actions 的 log_prob
+```
+
+新增测试文件：
+
+```text
+debug/test_action_sampler.py
+```
+
+测试输出如下：
+
+```text
+Testing PPO action sampler...
+step=1, value=0.1119, log_prob=-24.4103, check_log_prob=-24.4103, entropy=1.2209, delivered=0, dropped=0, violations=0
+...
+step=10, value=0.1120, log_prob=-25.9847, check_log_prob=-25.9847, entropy=1.2998, delivered=3, dropped=52, violations=20
+PPO action sampler interface OK.
+```
+
+关键结论：
+
+```text
+log_prob 与 check_log_prob 完全一致，说明 PPO 更新阶段重新计算动作概率的逻辑正确。
+entropy 处于正常范围，说明策略仍具有探索性。
+```
+
+---
+
+## 十九、最小版 PPO 训练脚本
+
+随后实现了最小版 PPO 训练脚本：
+
+```text
+train/train_gat_rl.py
+```
+
+该脚本完成：
+
+```text
+1. 使用 EdgeGATActorCritic 作为策略网络
+2. 从环境采样 rollout
+3. 计算 reward
+4. 使用 GAE 计算 advantage
+5. 使用 PPO clip loss 更新 Actor-Critic
+6. 保存训练日志
+7. 保存模型权重
+```
+
+运行后生成：
+
+```text
+data/results/gat_rl_training_log.csv
+checkpoints/gat_rl/edge_gat_actor_critic.pt
+```
+
+训练结果显示：
+
+```text
+PPO 训练流程可以正常运行，但模型效果较差。
+```
+
+主要表现为：
+
+```text
+1. eval_delivery_ratio 大多只有 0.03 ~ 0.07
+2. 明显低于 Energy-aware baseline 的约 0.316
+3. value_loss 波动很大
+4. actor_loss 接近 0，说明 Actor 更新信号较弱
+```
+
+阶段结论：
+
+```text
+最小版 PPO 训练流程已跑通，能够正常采样 rollout、计算 log_prob、value、entropy，并保存训练日志和模型权重。但从随机初始化直接使用 PPO 学习路由效果较差，策略明显弱于传统 Energy-aware baseline。因此后续不应继续盲目堆叠复杂网络，而应先采用专家策略监督预训练。
+```
+
+当前 PPO 权重保留为调试 checkpoint：
+
+```text
+checkpoints/gat_rl/edge_gat_actor_critic.pt
+```
+
+但不作为最终模型。
+
+---
+
+## 二十、PPO 训练曲线与 baseline 对比图
+
+为了可视化 PPO 训练效果，新增绘图脚本：
+
+```text
+eval/plot_training_curves.py
+```
+
+运行命令：
+
+```powershell
+python -m eval.plot_training_curves
+```
+
+生成目录：
+
+```text
+data/results/training_figures/
+```
+
+生成的图包括：
+
+```text
+ppo_avg_reward.png
+ppo_sum_reward.png
+ppo_actor_loss.png
+ppo_value_loss.png
+ppo_entropy.png
+ppo_eval_delivery_ratio.png
+ppo_eval_drop_ratio.png
+delivery_ratio_vs_baselines.png
+drop_ratio_vs_baselines.png
+avg_delay_vs_baselines.png
+constraint_violations_vs_baselines.png
+```
+
+该步骤用于直观展示：
+
+```text
+GAT-PPO 在当前阶段明显弱于传统 baseline，需要引入专家预训练。
+```
+
+---
+
+## 二十一、生成 Energy-aware 专家数据
+
+根据 PPO 训练结果，确定采用：
+
+```text
+Energy-aware baseline
+↓
+生成专家数据
+↓
+行为克隆预训练 GAT
+↓
+再用 PPO 微调
+```
+
+新增专家数据生成脚本：
+
+```text
+train/generate_expert_data.py
+```
+
+专家样本格式设计为：
+
+```text
+state + src + dst -> expert_next_hop
+```
+
+也就是：
+
+```text
+当前图状态
+当前转发节点 src
+目标节点 dst
+Energy-aware 策略给出的下一跳 expert_next_hop
+```
+
+运行命令：
+
+```powershell
+python -m train.generate_expert_data
+```
+
+输出结果：
+
+```text
+Generating expert dataset...
+episode=001, samples=7341, total_samples=7341, delivery=0.2251, drop=0.7718
+episode=002, samples=9294, total_samples=16635, delivery=0.1835, drop=0.8146
+episode=003, samples=3387, total_samples=20022, delivery=0.3456, drop=0.6341
+
+Expert dataset finished.
+Total samples: 20000
+```
+
+生成文件：
+
+```text
+data/expert/energy_expert_dataset.pkl
+data/expert/energy_expert_dataset_stats.csv
+```
+
+样本示例：
+
+```text
+src: 9
+dst: 14
+expert_next_hop: 4
+node_features: (20, 9)
+edge_index: (2, 60)
+edge_attr: (60, 5)
+adj: (20, 20)
+```
+
+---
+
+## 二十二、Destination-aware GAT 模型
+
+由于专家样本是：
+
+```text
+state + src + dst -> expert_next_hop
+```
+
+原来的 `actions[src] = next_hop` 形式不够精确，因此将模型升级为 destination-aware 形式。
+
+首先扩展环境接口：
+
+```python
+def step(self, policy="random", actions=None, action_matrix=None):
+```
+
+新增支持：
+
+```text
+action_matrix[src, dst] = next_hop
+```
+
+这使模型可以针对不同目的节点选择不同下一跳。
+
+随后新增模型文件：
+
+```text
+models/dest_edge_gat.py
+```
+
+该模型输入：
+
+```text
+node_features
+edge_index
+edge_attr
+src_node
+dst_node
+```
+
+输出：
+
+```text
+logits: [N]
+```
+
+其中：
+
+```text
+logits[j] 表示当前 src 针对目的节点 dst 选择 j 作为下一跳的得分
+```
+
+同时实现了：
+
+```python
+predict_action_matrix()
+```
+
+用于在完整环境中生成：
+
+```text
+action_matrix[src, dst] = next_hop
+```
+
+新增测试文件：
+
+```text
+debug/test_dest_edge_gat_forward.py
+```
+
+测试输出：
+
+```text
+Testing destination-aware EdgeGAT...
+step=1, logits_shape=(20,), action_matrix_shape=(20, 20), delivered=0, dropped=0, violations=0
+...
+step=10, logits_shape=(20,), action_matrix_shape=(20, 20), delivered=4, dropped=26, violations=0
+Destination-aware EdgeGAT interface OK.
+```
+
+说明：
+
+```text
+state + src + dst -> logits
+action_matrix -> env.step(action_matrix)
+```
+
+这条链路已经打通。
+
+---
+
+## 二十三、行为克隆预训练 BC-GAT
+
+新增行为克隆训练脚本：
+
+```text
+train/pretrain_gat_bc.py
+```
+
+使用数据：
+
+```text
+data/expert/energy_expert_dataset.pkl
+```
+
+训练目标：
+
+```text
+让 Destination-aware EdgeGAT 模仿 Energy-aware baseline 的下一跳选择
+```
+
+训练输出文件：
+
+```text
+data/results/bc_pretrain_log.csv
+checkpoints/gat_bc/dest_edge_gat_bc.pt
+```
+
+训练结果如下：
+
+```text
+epoch,train_loss,train_acc,val_loss,val_acc
+1,1.0882,0.6816,1.1413,0.6788
+2,1.1517,0.6954,1.1682,0.6918
+3,1.1421,0.7023,1.0898,0.6975
+4,1.1039,0.7087,1.0593,0.7050
+5,1.0883,0.7097,1.0965,0.7005
+6,1.0824,0.7135,1.0350,0.7100
+7,1.0459,0.7314,0.9148,0.7663
+8,0.9039,0.7860,0.7758,0.8210
+```
+
+关键结果：
+
+```text
+val_acc 从 0.6788 提升到 0.8210
+val_loss 从 1.4113 降到 0.7758
+```
+
+阶段结论：
+
+```text
+Destination-aware EdgeGAT 已经能够较好地模仿 Energy-aware expert 的单步下一跳选择，行为克隆预训练成功。
+```
+
+---
+
+## 二十四、BC 预训练曲线
+
+为了观察行为克隆训练过程，新增绘图脚本：
+
+```text
+eval/plot_bc_curves.py
+```
+
+运行命令：
+
+```powershell
+python -m eval.plot_bc_curves
+```
+
+生成目录：
+
+```text
+data/results/bc_figures/
+```
+
+生成图：
+
+```text
+bc_loss.png
+bc_accuracy.png
+```
+
+---
+
+## 二十五、BC-GAT 完整环境评估
+
+为了验证 BC-GAT 在完整 episode 中的实际路由性能，新增评估脚本：
+
+```text
+eval/evaluate_bc_policy.py
+```
+
+运行命令：
+
+```powershell
+python -m eval.evaluate_bc_policy
+```
+
+评估结果：
+
+```text
+Using device: cpu
+Evaluating BC-GAT policy...
+seed=0, delivery_ratio=0.2147, drop_ratio=0.7790, avg_delay=7.6656, violations=412
+seed=1, delivery_ratio=0.3169, drop_ratio=0.6783, avg_delay=8.0471, violations=303
+seed=2, delivery_ratio=0.2571, drop_ratio=0.7360, avg_delay=7.9432, violations=350
+seed=3, delivery_ratio=0.3168, drop_ratio=0.6747, avg_delay=7.9521, violations=261
+seed=4, delivery_ratio=0.2964, drop_ratio=0.6975, avg_delay=7.7804, violations=291
+```
+
+平均结果：
+
+```text
+delivery_ratio              0.280360
+drop_ratio                  0.713086
+avg_delay                   7.877670
+avg_remaining_energy      946.075607
+constraint_violations     323.400000
+total_hops               7729.800000
+```
+
+生成文件：
+
+```text
+data/results/bc_eval_results.csv
+```
+
+---
+
+## 二十六、BC-GAT 与 baseline 对比
+
+新增对比脚本：
+
+```text
+eval/compare_bc_with_baselines.py
+```
+
+运行后生成：
+
+```text
+data/results/baseline_bc_summary.csv
+data/results/bc_vs_baselines_figures/
+```
+
+当前对比结果：
+
+```text
+policy,delivery_ratio,drop_ratio,avg_delay,avg_remaining_energy,constraint_violations,total_hops
+random,0.2771,0.7206,6.8717,958.7856,305.6,4075.6
+shortest,0.2871,0.7116,7.0660,962.4686,409.4,3672.4
+min_delay,0.3005,0.6956,7.1675,951.4102,308.4,5889.4
+energy,0.3160,0.6799,7.2167,951.6843,296.2,5811.6
+bc_gat,0.2804,0.7131,7.8777,946.0756,323.4,7729.8
+```
+
+分析结论：
+
+```text
+BC-GAT 已经能够完整运行，并且投递率略高于 random baseline。
+但目前仍低于 shortest、min_delay 和 energy baseline。
+```
+
+尤其需要注意：
+
+```text
+energy total_hops = 5811.6
+bc_gat total_hops = 7729.8
+```
+
+说明 BC-GAT 虽然单步模仿准确率较高，但在完整 episode 中仍存在：
+
+```text
+1. 多跳误差累积
+2. 绕行偏多
+3. 跳数偏高
+4. 时延偏大
+5. 丢包率仍较高
+```
+
+---
+
+## 二十七、当前阶段总结
+
+从上一次日志到现在，新增完成内容如下：
+
+```text
+1. 实现 EdgeGATPolicy
+2. 完成 EdgeGAT 前向测试
+3. 实现 EdgeGATActorCritic
+4. 完成 Actor-Critic 前向测试
+5. 实现 PPO 动作采样器 action_sampler.py
+6. 完成 log_prob / entropy 测试
+7. 实现最小 PPO 训练脚本
+8. 跑通 PPO 训练流程并保存 checkpoint
+9. 绘制 PPO 训练曲线与 baseline 对比图
+10. 分析发现随机初始化 PPO 难以学好路由策略
+11. 生成 Energy-aware expert dataset
+12. 实现 Destination-aware EdgeGAT
+13. 扩展环境支持 action_matrix[src, dst]
+14. 完成 Destination-aware GAT 前向测试
+15. 使用 expert dataset 完成行为克隆预训练
+16. BC-GAT 验证准确率达到 0.8210
+17. 绘制 BC 训练曲线
+18. 完成 BC-GAT 完整 episode 环境评估
+19. 完成 BC-GAT 与传统 baseline 的结果对比
+```
+
+---
+
+## 二十八、当前结论
+
+目前项目已经从：
+
+```text
+只能跑传统 baseline 的仿真系统
+```
+
+推进到：
+
+```text
+可以训练和评估神经网络路由策略的完整实验系统
+```
+
+已经具备：
+
+```text
+动态图环境
+baseline 策略
+动作投影
+EdgeGAT 模型
+Actor-Critic 网络
+PPO 训练流程
+专家数据生成
+Destination-aware GAT
+行为克隆预训练
+模型评估与对比画图
+```
+
+当前最重要的实验结论是：
+
+```text
+1. 随机初始化的 EdgeGAT-PPO 难以直接学到有效路由策略。
+2. Energy-aware expert dataset 可以有效提升 GAT 的单步路由模仿能力。
+3. Destination-aware GAT 在行为克隆验证集上的准确率达到 0.8210。
+4. 但在完整环境评估中，BC-GAT 的 delivery_ratio 为 0.2804，仍低于 Energy-aware baseline 的 0.3160。
+5. BC-GAT 的 total_hops 较高，说明多跳误差累积和绕行问题仍然存在。
+```
+
+---
+
+## 二十九、下一步计划
+
+下一步不建议立即进入 Diffusion 或 Graph-MoE，而是先继续增强 BC-GAT。
+
+推荐路线：
+
+```text
+扩大 expert dataset
+↓
+重新训练 BC-GAT
+↓
+重新评估完整 episode 表现
+↓
+目标：delivery_ratio ≥ 0.30
+↓
+再使用 BC 权重初始化 PPO 微调
+```
+
+建议修改专家数据配置为：
+
+```python
+@dataclass
+class ExpertDataConfig:
+    n_nodes: int = 20
+    episode_steps: int = 200
+
+    num_episodes: int = 100
+    seed_start: int = 1000
+
+    max_samples: int = 100000
+    expert_policy: str = "energy"
+```
+
+如果电脑较慢，可以先用：
+
+```python
+max_samples: int = 50000
+```
+
+下一步目标：
+
+```text
+让 BC-GAT 至少接近 min_delay baseline，最好接近 Energy-aware baseline。
+```
+
+达到该目标后，再进行：
+
+```text
+BC 初始化 + PPO 微调
+```
+
+然后再考虑继续加入：
+
+```text
+Diffusion Policy
+Graph-MoE
+Adaptive Denoising Steps
+```
